@@ -62,12 +62,14 @@ RUN apt install -y watchdog || sed -i '/systemctl/d' /var/lib/dpkg/info/watchdog
 # Workaround for nvue
 # RUN ln -s /usr/bin/env /bin/env
 RUN apt install -y python3-nvue || sed -i '/systemctl restart/d' /var/lib/dpkg/info/python3-nvue.postinst && \
-    apt install -y python3-nvue && \
-    sed -i 's/KEY=.*/KEY=nvue/' /usr/lib/nvue/nvued-pre.sh
+    apt install -y python3-nvue
 
 RUN echo ". /etc/profile" >> /root/.bashrc
 
 ## HACKS (to make various services work)
+
+# Symlink to /etc/rsyslog.conf.cumulus fails due to AppArmor
+RUN rm /etc/rsyslog.conf && cp /etc/rsyslog.conf.cumulus /etc/rsyslog.conf
 
 # Disable ZTP
 RUN rm /etc/systemd/system/multi-user.target.wants/ztp.service
@@ -126,13 +128,15 @@ RUN sudo usermod -aG sudo cumulus
 # Enabling remote API access by default
 # RUN ln -s /etc/nginx/sites-available/nvue.conf /etc/nginx/sites-enabled/nvue.conf && \
 #     sed -i 's/listen localhost:8765 ssl;/listen \[::\]:8765 ipv6only=off ssl;/g' /etc/nginx/sites-available/nvue.conf
+# Fix nginx-authenticator.service
+RUN sed -i 's/listen localhost:54321;/listen 127.0.0.1:54321;/' /etc/nginx/auth/nginx_auth_nvue.conf
 
 # Enable vrf mgmt by default
 COPY hacks/interfaces /etc/network/interfaces
 
 # Copy sysctl settings
 COPY hacks/sysctl.d/ /etc/sysctl.d/
-COPY hacks/systemd-sysctl.service /lib/systemd/system/systemd-sysctl.service
+COPY hacks/systemd-sysctl.service.5.11 /lib/systemd/system/systemd-sysctl.service
 
 # Pre-create resolve.conf and stop dhclient from trying to change it
 RUN echo 'make_resolv_conf() { :; }' > /etc/dhcp/dhclient-enter-hooks.d/leave_my_resolv_conf_alone && \
@@ -150,6 +154,14 @@ RUN sed -i 's/#timeout 60;/timeout 2;/' /etc/dhcp/dhclient.conf
 
 # Disable smond
 RUN rm /etc/systemd/system/multi-user.target.wants/smond.service
+
+# Docker doesn't seem to be able to create *some* sysctl paths, like /proc/sys/net/ipv4/neigh/default/
+RUN sed -i 's/except ctx.sh.ErrorReturnCode_255:/except (ctx.sh.ErrorReturnCode_255, ctx.sh.ErrorReturnCode_1):/' \
+      /usr/lib/python3/dist-packages/nos/funits/cue_env_v1/native.py
+
+RUN apt install patch -y
+COPY hacks/lifecycle.patch /tmp/
+RUN patch /usr/lib/python3/dist-packages/nos/funits/cue_env_v1/lifecycle.py < /tmp/lifecycle.patch
 
 # Install PCAP-capable hsflowd
 COPY hacks/hsflowd_2.0.36-2_amd64.deb /tmp

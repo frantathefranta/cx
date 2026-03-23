@@ -1,0 +1,15 @@
+  hacks/lifecycle.patch:
+  --- a/lifecycle.py
+  +++ b/lifecycle.py
+  @@ -1537,7 +1537,10 @@
+       kv2 = {}
+       for k, v in kv.items():
+  -        current_val = evt._ctx.env_v1.getSysctl(k).get("value")
+  -        if current_val != v:
+  +        try:
+  +            current_val = evt._ctx.env_v1.getSysctl(k).get("value")
+  +        except Exception:
+  +            continue
+  +        if current_val != v:
+               kv2[k] = v
+       kv = kv2

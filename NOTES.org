@@ -1,3 +1,5 @@
 #+title: Notes
 * Roadblocks
 - Ran into an issue with 5.11.0 where ~python3-jsonschema~ doesn't exist in Packages, so a lot of ~python3-*~ dependencies could not be installed.
+
+- ~/etc/hostname~ and ~/etc/hosts~ want to be overwritten but they are /usually/ bind-mounted into the container, which breaks that.
