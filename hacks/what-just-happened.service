@@ -1,0 +1,17 @@
+[Unit]
+Description=what-just-happened stub (package removed from the container image)
+Documentation=man:true(1)
+
+# The what-just-happened package is ASIC telemetry that is useless without real
+# switching hardware, so it is stripped from the image. NVUE still owns its
+# config file and tries to enable/restart the unit during 'nv config apply',
+# which produced "Install of '/etc/what-just-happened/what-just-happened.json'
+# failed". This stub keeps those operations quiet.
+
+[Service]
+Type=oneshot
+ExecStart=/bin/true
+RemainAfterExit=true
+
+[Install]
+WantedBy=multi-user.target

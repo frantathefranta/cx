@@ -38,6 +38,24 @@ host:
 run:
 	$(CONTAINER_CLI) run -d --name cumulus --privileged -p 8765:8765 $(REGISTRY)/$(IMAGE):$(TAG)
 
+IMAGE_REF ?= $(REGISTRY)/$(IMAGE):$(TAG)
+TEST_ENV := CONTAINER_CLI=$(CONTAINER_CLI) $(if $(PLATFORM),PLATFORM=$(PLATFORM),)
+
+.PHONY: test
+## Run the full image test suite (runtime tests need a native amd64 host)
+test:
+	$(TEST_ENV) ./tests/run.sh $(IMAGE_REF)
+
+.PHONY: test-static
+## Run offline image tests only (works under emulation)
+test-static:
+	$(TEST_ENV) ./tests/static.sh $(IMAGE_REF)
+
+.PHONY: test-runtime
+## Boot the image and test services (requires native amd64)
+test-runtime:
+	$(TEST_ENV) ./tests/runtime.sh $(IMAGE_REF)
+
 
 # From: https://gist.github.com/klmr/575726c7e05d8780505a
 help:

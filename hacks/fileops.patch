@@ -1,0 +1,21 @@
+--- /tmp/fileops.orig.py	2026-08-18 10:12:57
++++ /tmp/fileops.new.py	2026-08-18 10:12:57
+@@ -505,7 +505,17 @@
+             try:
+                 sh.sudo.mv(src, dst)
+             except sh.ErrorReturnCode:
+-                raise FileNotFoundError([src, dst])
++                # In a container, /etc/hosts, /etc/hostname and
++                # /etc/resolv.conf are bind-mounted by the runtime. rename(2)
++                # over a mount point fails with EBUSY and mv(1) does not fall
++                # back to a copy, so NVUE could never install those files.
++                # Copy the contents through the mount instead, which keeps the
++                # mounted inode in place.
++                try:
++                    sh.sudo.cp(src, dst)
++                    sh.sudo.rm("-f", src)
++                except sh.ErrorReturnCode:
++                    raise FileNotFoundError([src, dst])
+ 
+             # It exists.  OK to copy.
+             sh.sudo.chown(chown, dst)

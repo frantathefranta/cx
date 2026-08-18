@@ -5,7 +5,7 @@ ENV LC_ALL C
 ENV DEBIAN_FRONTEND noninteractive
 
 # Install systemd :)
-RUN apt update && apt install -y vim systemd udev pciutils sudo tcpdump less util-linux gnupg ca-certificates
+RUN apt update && apt install -y vim systemd udev pciutils sudo tcpdump less util-linux gnupg ca-certificates openssh-server
 
 # Copy Cumulus repos and a list of packages
 # NOTE: apt list --installed 2>/dev/null | tail -n +2 | cut -d '/' -f1 > packages
@@ -13,6 +13,20 @@ RUN apt update && apt install -y vim systemd udev pciutils sudo tcpdump less uti
 COPY 5.11/packages packages
 COPY 5.11/sources.list /etc/apt/sources.list
 COPY 5.11/trusted.gpg /etc/apt/trusted.gpg
+
+# Cumulus 5.11.5's 'upstream' component is a frozen mirror of Debian 12.13
+# (base-files 12.4+deb12u13; repo Release date 2026-02-03), while deb.debian.org keeps
+# moving: openssh 1:9.2p1-2+deb12u10 landed 2026-05-05, superseding the deb12u7 that
+# Cumulus mirrors. openssh-server has a strict "Depends: openssh-client (= <same version>)",
+# and 5.11/packages pins openssh-client=...deb12u7 but never lists openssh-server, so the
+# bulk install downgrades the client, strands the server at deb12u10, and cumulus-overrides
+# (which needs both) becomes unsatisfiable -> "held broken packages".
+# NOTE: pinning the base image tag does NOT help; it freezes the rootfs, not the repos.
+# Pin the Cumulus repo above Debian (1001 = allow downgrades) so both come from one snapshot.
+# NOTE: must sort before 20_prefer_cumulus, which cumulus-overrides installs at priority 991;
+# apt reads preferences.d in alphabetical order and the first matching entry wins.
+RUN printf 'Package: *\nPin: release n=CumulusLinux-5.11.5\nPin-Priority: 1001\n' \
+      > /etc/apt/preferences.d/00_cumulus_snapshot
 
 # This is for NTP package
 RUN mkdir -p /usr/lib/systemd/system-preset/
@@ -162,6 +176,22 @@ RUN sed -i 's/except ctx.sh.ErrorReturnCode_255:/except (ctx.sh.ErrorReturnCode_
 RUN apt install patch -y
 COPY hacks/lifecycle.patch /tmp/
 RUN patch /usr/lib/python3/dist-packages/nos/funits/cue_env_v1/lifecycle.py < /tmp/lifecycle.patch
+
+# NVUE installs managed files by writing <file>.part and renaming it into place.
+# The container runtime bind-mounts /etc/hosts, /etc/hostname and /etc/resolv.conf,
+# and rename(2) over a mount point fails with EBUSY, so 'nv config apply' reports
+# "Install of '/etc/hosts' failed" and the hostname is never written.
+# Fall back to copying the contents through the mount.
+COPY hacks/fileops.patch /tmp/
+RUN patch /usr/lib/python3/dist-packages/core/infra/cue/fileops.py < /tmp/fileops.patch
+
+# 'what-just-happened' is stripped from the image (ASIC telemetry, useless in a
+# container) but NVUE still owns its config file and unit, so 'nv config apply'
+# reported "Install of '/etc/what-just-happened/what-just-happened.json' failed".
+# netlab fails a task when 'failed' appears in the apply output, so give NVUE a
+# directory to write into and a stub unit to enable/restart.
+RUN mkdir -p /etc/what-just-happened
+COPY hacks/what-just-happened.service /lib/systemd/system/what-just-happened.service
 
 # Install PCAP-capable hsflowd
 COPY hacks/hsflowd_2.0.36-2_amd64.deb /tmp
