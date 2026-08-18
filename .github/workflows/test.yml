@@ -1,0 +1,35 @@
+name: build and test
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-test:
+    # ubuntu-latest is amd64, which the runtime tests require: systemd is not
+    # usable under qemu-user emulation.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        tag: ["5.11.5"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: make build TAG=${{ matrix.tag }}
+
+      - name: Static image tests
+        run: make test-static TAG=${{ matrix.tag }}
+
+      - name: Runtime tests (boots systemd)
+        run: make test-runtime TAG=${{ matrix.tag }}
+
+      - name: Dump container logs on failure
+        if: failure()
+        run: |
+          docker ps -a
+          docker logs cx-runtime-test 2>&1 | tail -100 || true
+          docker exec cx-runtime-test systemctl list-units --state=failed --no-pager || true
