@@ -58,9 +58,16 @@ RUN  sed -i '/cumulus-docker-setup/d' packages && \
     sed -i '/cumulus-tools/d' packages && \
     sed -i '/openvswitch-vtep/d' packages
 
-RUN apt install -y cumulus-overrides || \
+# --allow-downgrades is required because the apt pin above deliberately pulls
+# packages back to the Cumulus snapshot (e.g. libcap2, openssh) when the base
+# image ships newer Debian point-release versions.
+# The fallback only rewrites the postinst if the package actually got unpacked;
+# if apt refused outright there is nothing to patch.
+RUN apt install -y --allow-downgrades cumulus-overrides || \
       ( touch /lib/systemd/system/auditd.service && \
-        sed -i 's/^\(\s*\)systemctl /\1true # systemctl /g' /var/lib/dpkg/info/cumulus-overrides.postinst && \
+        if [ -f /var/lib/dpkg/info/cumulus-overrides.postinst ]; then \
+          sed -i 's/^\(\s*\)systemctl /\1true # systemctl /g' /var/lib/dpkg/info/cumulus-overrides.postinst; \
+        fi && \
         dpkg --configure -a )
 
 # Install everything else
@@ -87,6 +94,15 @@ RUN rm /etc/rsyslog.conf && cp /etc/rsyslog.conf.cumulus /etc/rsyslog.conf
 
 # Disable ZTP
 RUN rm /etc/systemd/system/multi-user.target.wants/ztp.service
+
+# nvue-startup applies the saved startup config at boot, which costs ~3 minutes
+# of the ~6.5 minute boot and is redundant here: netlab/Ansible push their own
+# config with 'nv config patch' + 'nv config apply' once the node is up.
+# Measured on an emulated amd64 VM: 405s -> 194s boot, 0 failed units.
+# nvued itself stays enabled, so the NVUE CLI and REST API are unaffected.
+# NOTE: a standalone container will no longer re-apply its saved startup config
+# on boot; run 'systemctl start nvue-startup' (or re-link the unit) if you need that.
+RUN rm -f /etc/systemd/system/multi-user.target.wants/nvue-startup.service
 
 # We'll pretend we're cumulus vx (needed to start netd)
 RUN echo "echo -n 'x86-cumulus_vx-docker'" > /bin/onie-sysinfo
