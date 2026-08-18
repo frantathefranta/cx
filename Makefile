@@ -41,6 +41,23 @@ run:
 IMAGE_REF ?= $(REGISTRY)/$(IMAGE):$(TAG)
 TEST_ENV := CONTAINER_CLI=$(CONTAINER_CLI) $(if $(PLATFORM),PLATFORM=$(PLATFORM),)
 
+VERSION ?= $(TAG)
+
+.PHONY: new-version
+## Bootstrap files for a new CL release (VERSION=5.12.0 [FROM=5.11.5])
+new-version:
+	./scripts/new-version.sh $(VERSION) $(if $(FROM),--from $(FROM),)
+
+.PHONY: validate
+## Check a version's Dockerfile and manifests before building (VERSION=5.12.0)
+validate:
+	./scripts/validate-version.sh $(VERSION)
+
+.PHONY: versions
+## List Cumulus versions published upstream
+versions:
+	@. ./scripts/lib-versions.sh && list_versions | tail -30
+
 .PHONY: test
 ## Run the full image test suite (runtime tests need a native amd64 host)
 test:

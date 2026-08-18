@@ -1,0 +1,6 @@
+# Cumulus Linux package repository
+deb      https://download.nvidia.com/cumulus/apt.cumulusnetworks.com/repo CumulusLinux-5.15.0 cumulus upstream netq
+deb-src  https://download.nvidia.com/cumulus/apt.cumulusnetworks.com/repo CumulusLinux-5.15.0 cumulus upstream netq
+
+# This version of /etc/apt/sources.list is used if it is not provided by a
+# package such as cumulus-archive-keyring.

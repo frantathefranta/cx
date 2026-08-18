@@ -85,6 +85,12 @@ assert_eq "ZTP disabled" \
   "yes" "$(in_image 'test ! -e /etc/systemd/system/multi-user.target.wants/ztp.service && echo yes')"
 assert_eq "smond disabled" \
   "yes" "$(in_image 'test ! -e /etc/systemd/system/multi-user.target.wants/smond.service && echo yes')"
+# Boot-time startup-apply is redundant when netlab pushes config after boot, and
+# it accounted for roughly half the boot time.
+assert_eq "nvue-startup not enabled at boot (netlab applies config itself)" \
+  "yes" "$(in_image 'test ! -e /etc/systemd/system/multi-user.target.wants/nvue-startup.service && echo yes')"
+assert_eq "nvued still enabled (NVUE CLI/API must work)" \
+  "yes" "$(in_image 'test -e /etc/systemd/system/multi-user.target.wants/nvued.service && echo yes')"
 assert_contains "switchd stubbed out (no real ASIC in a container)" \
   "$(in_image 'grep ^ExecStart /lib/systemd/system/switchd.service')" "tail -f /dev/null"
 assert_contains "aclinit stubbed out" \

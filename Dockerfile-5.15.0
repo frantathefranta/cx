@@ -1,0 +1,212 @@
+FROM debian:bookworm-20260316
+
+ENV container docker
+ENV LC_ALL C
+ENV DEBIAN_FRONTEND noninteractive
+
+# Install systemd :)
+RUN apt update && apt install -y vim systemd udev pciutils sudo tcpdump less util-linux gnupg ca-certificates openssh-server
+
+# Copy Cumulus repos and a list of packages
+# NOTE: apt list --installed 2>/dev/null | tail -n +2 | cut -d '/' -f1 > packages
+# or apt list --installed  2>/dev/null | tail -n +2 | awk -F '/| ' '{print $1"="$3}' | grep cl > packages
+COPY 5.15/packages packages
+COPY 5.15/sources.list /etc/apt/sources.list
+COPY 5.15/trusted.gpg /etc/apt/trusted.gpg
+
+# Cumulus 5.15.0's 'upstream' component is a frozen mirror of Debian 12.13
+# (base-files 12.4+deb12u13; repo Release date 2026-02-03), while deb.debian.org keeps
+# moving: openssh 1:9.2p1-2+deb12u10 landed 2026-05-05, superseding the deb12u7 that
+# Cumulus mirrors. openssh-server has a strict "Depends: openssh-client (= <same version>)",
+# and 5.15/packages pins openssh-client=...deb12u7 but never lists openssh-server, so the
+# bulk install downgrades the client, strands the server at deb12u10, and cumulus-overrides
+# (which needs both) becomes unsatisfiable -> "held broken packages".
+# NOTE: pinning the base image tag does NOT help; it freezes the rootfs, not the repos.
+# Pin the Cumulus repo above Debian (1001 = allow downgrades) so both come from one snapshot.
+# NOTE: must sort before 20_prefer_cumulus, which cumulus-overrides installs at priority 991;
+# apt reads preferences.d in alphabetical order and the first matching entry wins.
+RUN printf 'Package: *\nPin: release n=CumulusLinux-5.15.0\nPin-Priority: 1001\n' \
+      > /etc/apt/preferences.d/00_cumulus_snapshot
+
+# This is for NTP package
+RUN mkdir -p /usr/lib/systemd/system-preset/
+
+RUN apt update
+
+# Delete unwanted packages
+RUN  sed -i '/cumulus-docker-setup/d' packages && \
+    sed -i '/docker-ce/d' packages && \
+    sed -i '/docker-ce-cli/d' packages && \
+    sed -i '/what-just-happened/d' packages && \
+    sed -i '/containerd.io/d' packages && \
+    sed -i '/onie-tools/d' packages && \
+    sed -i '/grub-common/d' packages && \
+    sed -i '/grub2-common/d' packages && \
+    sed -i '/grub-pc/d' packages && \
+    sed -i '/grub-pc-bin/d' packages && \
+    sed -i '/netq-agent/d' packages && \
+    sed -i '/netq-apps/d' packages && \
+    sed -i '/openvswitch-common/d' packages && \
+    sed -i '/python-openvswitch/d' packages && \
+    sed -i '/python3-nvue/d' packages && \
+    sed -i '/watchdog/d' packages && \
+    sed -i '/cumulus-archive-keyring/d' packages && \
+    sed -i '/linux-image/d' packages && \
+    sed -i '/libyang/d' packages && \
+    sed -i '/cumulus-overrides/d' packages && \
+    sed -i '/switchd/d' packages && \
+    sed -i '/cumulus-tools/d' packages && \
+    sed -i '/openvswitch-vtep/d' packages
+
+# --allow-downgrades is required because the apt pin above deliberately pulls
+# packages back to the Cumulus snapshot (e.g. libcap2, openssh) when the base
+# image ships newer Debian point-release versions.
+# The fallback only rewrites the postinst if the package actually got unpacked;
+# if apt refused outright there is nothing to patch.
+RUN apt install -y --allow-downgrades cumulus-overrides || \
+      ( touch /lib/systemd/system/auditd.service && \
+        if [ -f /var/lib/dpkg/info/cumulus-overrides.postinst ]; then \
+          sed -i 's/^\(\s*\)systemctl /\1true # systemctl /g' /var/lib/dpkg/info/cumulus-overrides.postinst; \
+        fi && \
+        dpkg --configure -a )
+
+# Install everything else
+RUN apt install --allow-downgrades -y $(cat packages)
+
+# switchd depends on cumulus-tools which depends on cumulus-overrides which requires a lot of systemd changes
+RUN apt install -y switchd
+
+# Workaround for watchdog
+RUN apt install -y watchdog || sed -i '/systemctl/d' /var/lib/dpkg/info/watchdog.postinst && \
+    apt install -y watchdog
+
+# Workaround for nvue
+# RUN ln -s /usr/bin/env /bin/env
+RUN apt install -y python3-nvue || sed -i '/systemctl restart/d' /var/lib/dpkg/info/python3-nvue.postinst && \
+    apt install -y python3-nvue
+
+RUN echo ". /etc/profile" >> /root/.bashrc
+
+## HACKS (to make various services work)
+
+# Symlink to /etc/rsyslog.conf.cumulus fails due to AppArmor
+RUN rm /etc/rsyslog.conf && cp /etc/rsyslog.conf.cumulus /etc/rsyslog.conf
+
+# Disable ZTP
+RUN rm /etc/systemd/system/multi-user.target.wants/ztp.service
+
+# We'll pretend we're cumulus vx (needed to start netd)
+RUN echo "echo -n 'x86-cumulus_vx-docker'" > /bin/onie-sysinfo
+RUN chmod +x /bin/onie-sysinfo
+
+# MSTPd workaround
+COPY hacks/mstpd-shot /etc/systemd/system/mstpd-shot.service
+RUN  ln -s  /etc/systemd/system/mstpd-shot.service /etc/systemd/system/multi-user.target.wants/mstpd-shot.service
+
+
+# Disabling aclinit due to 'iptables --class' non-existing
+RUN sed -i 's/ExecStart=.*/ExecStart=true/' /lib/systemd/system/aclinit.service
+RUN sed -i 's/ExecStart=.*/ExecStart=true/' /lib/systemd/system/acltool.service
+RUN mkdir -p /etc/cumulus/acl/policy.d/ && \
+    rm -rf /etc/cumulus/acl/policy.d/* && \
+    touch /etc/cumulus/acl/policy.d/99control_plane_catch_all.rules
+# This is just to have one rule otherwise net delete all fails
+RUN echo "[ebtables]" >> /etc/cumulus/acl/policy.d/99control_plane_catch_all.rules && \
+    echo "-A INPUT -p ipv4 --in-interface swp+ -j ACCEPT" >> /etc/cumulus/acl/policy.d/99control_plane_catch_all.rules
+
+# Stubbing out ledmgrd to avoid polluting logs
+RUN sed -i 's/ExecStart=.*/ExecStart=tail -f \/dev\/null/' /lib/systemd/system/ledmgrd.service
+
+# Hardcoding platform to cumulux_vx
+RUN sed -i 's/forced_platform=None/forced_platform="cumulus_vx"/' /usr/lib/python3/dist-packages/cumulus/platforms/__init__.py
+
+# this is needed to get `net show configuration commands` working
+RUN touch /etc/cumulus/ports.conf
+
+# Stubbing out any calls to eeprom decoders to return spoofed data instead
+COPY hacks/decode-syseeprom.5.15 /usr/cumulus/bin/decode-syseeprom
+
+# Disabling switchd ffs
+RUN cp /lib/systemd/system/switchd.service /lib/systemd/system/switchd.service.bkp && \
+    sed -i 's/ExecStart=.*/ExecStart=tail -f \/dev\/null/' /lib/systemd/system/switchd.service && \
+    sed -i 's/Type=notify/Type=simple/' /lib/systemd/system/switchd.service && \
+    sed -i '/ExecReload=.*/d' /lib/systemd/system/switchd.service && \
+    sed -i '/ExecStopPost=.*/d' /lib/systemd/system/switchd.service && \
+    sed -i '/ExecStopPost=.*/d' /lib/systemd/system/switchd.service && \
+    sed -i '/WatchdogSec=.*/d' /lib/systemd/system/switchd.service
+
+# Enabling root login (for my SSH debugging purposes)
+RUN echo "root:vx1@Pass" | chpasswd && \
+    sed -i 's/#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+
+# Adding cumulus user
+RUN useradd -ms /bin/bash cumulus && \
+    echo "cumulus:Cemulus123!" | chpasswd
+
+# Add cumulus user to the sudo group
+RUN sudo usermod -aG sudo cumulus
+
+# Enabling remote API access by default
+# RUN ln -s /etc/nginx/sites-available/nvue.conf /etc/nginx/sites-enabled/nvue.conf && \
+#     sed -i 's/listen localhost:8765 ssl;/listen \[::\]:8765 ipv6only=off ssl;/g' /etc/nginx/sites-available/nvue.conf
+# Fix nginx-authenticator.service
+RUN sed -i 's/listen localhost:54321;/listen 127.0.0.1:54321;/' /etc/nginx/auth/nginx_auth_nvue.conf
+
+# Enable vrf mgmt by default
+COPY hacks/interfaces /etc/network/interfaces
+
+# Copy sysctl settings
+COPY hacks/sysctl.d/ /etc/sysctl.d/
+COPY hacks/systemd-sysctl.service.5.15 /lib/systemd/system/systemd-sysctl.service
+
+# Pre-create resolve.conf and stop dhclient from trying to change it
+RUN echo 'make_resolv_conf() { :; }' > /etc/dhcp/dhclient-enter-hooks.d/leave_my_resolv_conf_alone && \
+    chmod 755 /etc/dhcp/dhclient-enter-hooks.d/leave_my_resolv_conf_alone
+
+# Reduce dhclient timeout to avoid long startups
+RUN sed -i 's/#timeout 60;/timeout 2;/' /etc/dhcp/dhclient.conf
+
+# Hack hard-coded file paths
+# RUN ln -s /sbin/ifreload /usr/sbin/ifreload && \
+#     ln -s /bin/lsblk /usr/bin/lsblk
+
+# Ensure FRR always starts
+# RUN ln -s /lib/systemd/system/frr.service /etc/systemd/system/multi-user.target.wants/frr.service
+
+# Disable smond
+RUN rm /etc/systemd/system/multi-user.target.wants/smond.service
+
+# Docker doesn't seem to be able to create *some* sysctl paths, like /proc/sys/net/ipv4/neigh/default/
+RUN sed -i 's/except ctx.sh.ErrorReturnCode_255:/except (ctx.sh.ErrorReturnCode_255, ctx.sh.ErrorReturnCode_1):/' \
+      /usr/lib/python3/dist-packages/nos/funits/cue_env_v1/native.py
+
+RUN apt install patch -y
+COPY hacks/lifecycle.patch /tmp/
+RUN patch /usr/lib/python3/dist-packages/nos/funits/cue_env_v1/lifecycle.py < /tmp/lifecycle.patch
+
+# NVUE installs managed files by writing <file>.part and renaming it into place.
+# The container runtime bind-mounts /etc/hosts, /etc/hostname and /etc/resolv.conf,
+# and rename(2) over a mount point fails with EBUSY, so 'nv config apply' reports
+# "Install of '/etc/hosts' failed" and the hostname is never written.
+# Fall back to copying the contents through the mount.
+COPY hacks/fileops.patch /tmp/
+RUN patch /usr/lib/python3/dist-packages/core/infra/cue/fileops.py < /tmp/fileops.patch
+
+# 'what-just-happened' is stripped from the image (ASIC telemetry, useless in a
+# container) but NVUE still owns its config file and unit, so 'nv config apply'
+# reported "Install of '/etc/what-just-happened/what-just-happened.json' failed".
+# netlab fails a task when 'failed' appears in the apply output, so give NVUE a
+# directory to write into and a stub unit to enable/restart.
+RUN mkdir -p /etc/what-just-happened
+COPY hacks/what-just-happened.service /lib/systemd/system/what-just-happened.service
+
+# Install PCAP-capable hsflowd
+COPY hacks/hsflowd_2.0.36-2_amd64.deb /tmp
+RUN apt install -y /tmp/hsflowd_2.0.36-2_amd64.deb
+
+# sysmac workaround
+# COPY hacks/gen_sys_mac.py /usr/lib/cumulus/gen_sys_mac.py
+# COPY hacks/sys-mac-shot /etc/systemd/system/sys-mac-shot.service
+# RUN  ln -s  /etc/systemd/system/sys-mac-shot.service /etc/systemd/system/multi-user.target.wants/sys-mac-shot.service
+
+ENTRYPOINT ["/sbin/init"]
